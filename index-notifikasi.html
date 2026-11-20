@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scream Controlled Dino</title>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 18px; font-family: Arial, sans-serif; background: #f3f5f7; color: #202124; }
+  main { max-width: 850px; margin: auto; }
+  .panel { background: white; border-radius: 16px; padding: 18px; margin: 12px 0; box-shadow: 0 2px 10px #00000012; }
+  h1 { font-size: 25px; margin: 4px 0 8px; }
+  h2 { font-size: 20px; }
+  p { line-height: 1.5; }
+  input, button { font-size: 16px; padding: 12px; border-radius: 10px; }
+  input { width: 100%; border: 1px solid #bbb; margin: 8px 0 12px; }
+  button { border: 0; background: #1769e0; color: white; font-weight: bold; cursor: pointer; }
+  button:disabled { opacity: .5; }
+  .secondary { background: #555; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row button { flex: 1; min-width: 130px; }
+  .status { padding: 10px; background: #eef3fb; border-radius: 10px; min-height: 42px; }
+  #gameCanvas { display: block; width: 100%; height: auto; border: 2px solid #ddd; border-radius: 10px; background: #fff; }
+  .hidden { display: none; }
+  .meter { height: 18px; background: #e3e3e3; border-radius: 20px; overflow: hidden; margin: 10px 0; }
+  #meterFill { height: 100%; width: 0%; background: #16834a; transition: width .06s; }
+  .small { color: #5f6368; font-size: 13px; }
+  label { display: block; font-weight: bold; margin-top: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <section class="panel">
+    <h1>🦖 Scream Controlled Dino</h1>
+    <p>Tablet menjadi layar game. HP menjadi mikrofon/pengendali. Masukkan kode ruangan yang sama di kedua perangkat.</p>
+    <label for="room">Kode ruangan (contoh: dino123)</label>
+    <input id="room" value="dino123" maxlength="16" autocomplete="off">
+    <div class="row">
+      <button id="gameMode">Saya menggunakan TABLET (Game)</button>
+      <button id="phoneMode" class="secondary">Saya menggunakan HP (Mic)</button>
+    </div>
+    <p class="small">Gunakan kode ruangan sederhana, huruf dan angka saja. Jangan gunakan kata sandi pribadi.</p>
+  </section>
+
+  <section id="gamePanel" class="panel hidden">
+    <h2>🎮 Layar Game Dino</h2>
+    <p id="gameStatus" class="status">Menyiapkan game...</p>
+    <canvas id="gameCanvas" width="800" height="280"></canvas>
+    <p>Skor: <strong id="score">0</strong></p>
+    <button id="restart" class="secondary">Mulai ulang game</button>
+    <p class="small">Game akan melompat saat menerima sinyal suara dari HP.</p>
+  </section>
+
+  <section id="phonePanel" class="panel hidden">
+    <h2>🎤 Pengendali Suara (HP)</h2>
+    <p id="phoneStatus" class="status">Hubungkan ke tablet terlebih dahulu.</p>
+    <button id="connect">Hubungkan ke tablet</button>
+    <button id="enableNotifications" class="secondary">Aktifkan notifikasi HP</button>
+    <button id="mic" disabled>Aktifkan mikrofon</button>
+    <div id="phoneAlert" class="status hidden" role="status" aria-live="polite">Belum ada suara terdeteksi.</div>
+    <label for="threshold">Sensitivitas suara: <span id="thresholdText">0.10</span></label>
+    <input id="threshold" type="range" min="0.02" max="0.30" step="0.01" value="0.10">
+    <div class="meter"><div id="meterFill"></div></div>
+    <p id="soundStatus">Mikrofon belum aktif.</p>
+    <p class="small">Coba ucapkan “HA!” dengan suara normal. Tidak perlu berteriak keras. Atur sensitivitas jika terlalu mudah atau sulit mendeteksi suara.</p>
+  </section>
+</main>
+
+<script src="https://unpkg.com/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+let peer = null;
+let connection = null;
+let audioContext = null;
+let animationMic = null;
+let lastSent = 0;
+let notificationRegistration = null;
+
+function showPhoneAlert(message) {
+  const alertBox = $("phoneAlert");
+  alertBox.textContent = "🔔 " + message;
+  alertBox.classList.remove("hidden");
+  if ("vibrate" in navigator) navigator.vibrate([120, 60, 120]);
+}
+
+async function enablePhoneNotifications() {
+  if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+    showStatus("phoneStatus", "Notifikasi sistem tidak didukung browser ini. Pemberitahuan di halaman HP tetap tersedia.");
+    return;
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      showStatus("phoneStatus", "Izin notifikasi belum diberikan. Pemberitahuan di halaman HP tetap tersedia.");
+      return;
+    }
+    notificationRegistration = await navigator.serviceWorker.register("./sw.js");
+    await navigator.serviceWorker.ready;
+    showStatus("phoneStatus", "Notifikasi HP aktif! Kamu akan mendapat pemberitahuan saat suara terdeteksi.");
+    showPhoneAlert("Notifikasi HP berhasil diaktifkan.");
+  } catch (error) {
+    showStatus("phoneStatus", "Notifikasi sistem gagal diaktifkan. Pemberitahuan di halaman tetap tersedia.");
+  }
+}
+
+async function sendPhoneNotification(message) {
+  showPhoneAlert(message);
+  if (notificationRegistration && "Notification" in window && Notification.permission === "granted") {
+    try {
+      await notificationRegistration.showNotification("Scream Controlled Dino", {
+        body: message,
+        tag: "scream-dino-event",
+        renotify: true,
+        vibrate: [120, 60, 120]
+      });
+    } catch (error) {
+      // Pemberitahuan di halaman tetap tersedia.
+    }
+  }
+}
+
+function getRoom() {
+  const room = $("room").value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+  if (room.length < 4) {
+    alert("Kode ruangan minimal 4 karakter, gunakan huruf atau angka.");
+    return null;
+  }
+  return room;
+}
+
+function showStatus(id, message) { $(id).textContent = message; }
+
+$("threshold").addEventListener("input", () => {
+  $("thresholdText").textContent = Number($("threshold").value).toFixed(2);
+});
+
+$("gameMode").addEventListener("click", () => {
+  const room = getRoom();
+  if (!room) return;
+  $("gamePanel").classList.remove("hidden");
+  $("phonePanel").classList.add("hidden");
+  showStatus("gameStatus", "Menghubungkan game ke jaringan...");
+  startGame();
+  if (peer) peer.destroy();
+  peer = new Peer("scream-dino-" + room);
+  peer.on("open", () => showStatus("gameStatus", "Game siap. Sekarang hubungkan HP dengan kode ruangan yang sama."));
+  peer.on("connection", (conn) => {
+    connection = conn;
+    conn.on("open", () => showStatus("gameStatus", "HP terhubung! Buat suara dari HP untuk melompat."));
+    conn.on("data", (data) => {
+      if (data && data.type === "jump") {
+        jump();
+        showStatus("gameStatus", "Suara terdeteksi — DINO MELOMPAT!");
+      }
+    });
+    conn.on("close", () => {
+      connection = null;
+      showStatus("gameStatus", "HP terputus. Hubungkan kembali dari HP.");
+    });
+  });
+  peer.on("error", (err) => {
+    showStatus("gameStatus", "Koneksi bermasalah: " + err.type + ". Coba kode ruangan lain atau muat ulang.");
+  });
+});
+
+$("phoneMode").addEventListener("click", () => {
+  if (!getRoom()) return;
+  $("phonePanel").classList.remove("hidden");
+  $("gamePanel").classList.add("hidden");
+  showStatus("phoneStatus", "Tekan tombol Hubungkan ke tablet.");
+});
+
+$("enableNotifications").addEventListener("click", enablePhoneNotifications);
+
+$("connect").addEventListener("click", () => {
+  const room = getRoom();
+  if (!room) return;
+  if (peer) peer.destroy();
+  showStatus("phoneStatus", "Mencari tablet...");
+  $("connect").disabled = true;
+  peer = new Peer();
+  peer.on("open", () => {
+    connection = peer.connect("scream-dino-" + room);
+    connection.on("open", () => {
+      showStatus("phoneStatus", "Berhasil terhubung ke tablet!");
+      $("mic").disabled = false;
+      $("connect").disabled = false;
+    });
+    connection.on("error", () => {
+      showStatus("phoneStatus", "Tidak bisa terhubung. Pastikan game di tablet sudah dibuka dan kode sama.");
+      $("connect").disabled = false;
+    });
+    connection.on("close", () => {
+      showStatus("phoneStatus", "Koneksi terputus. Hubungkan kembali.");
+      $("mic").disabled = true;
+    });
+  });
+  peer.on("error", (err) => {
+    showStatus("phoneStatus", "Koneksi bermasalah: " + err.type + ". Coba lagi.");
+    $("connect").disabled = false;
+  });
+});
+
+$("mic").addEventListener("click", async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    await audioContext.resume();
+    const source = audioContext.createMediaStreamSource(stream);
+    const analyser = audioContext.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    $("mic").disabled = true;
+    $("mic").textContent = "Mikrofon aktif";
+    showStatus("soundStatus", "Mikrofon aktif. Ucapkan “HA!” untuk membuat Dino melompat.");
+    function listen() {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+      const volume = Math.sqrt(sum / samples.length);
+      $("meterFill").style.width = Math.min(100, volume * 300) + "%";
+      const threshold = Number($("threshold").value);
+      const now = Date.now();
+      if (volume > threshold && now - lastSent > 900) {
+        if (connection && connection.open) {
+          connection.send({ type: "jump" });
+          showStatus("soundStatus", "Suara terdeteksi! Perintah lompat dikirim.");
+          sendPhoneNotification("Suara terdeteksi — perintah lompat dikirim ke tablet.");
+          lastSent = now;
+        }
+      }
+      animationMic = requestAnimationFrame(listen);
+    }
+    listen();
+  } catch (err) {
+    showStatus("soundStatus", "Mikrofon tidak bisa diakses. Izinkan akses mikrofon di Chrome dan pastikan halaman memakai HTTPS.");
+    $("mic").disabled = false;
+  }
+});
+
+// Mini Dino runner game
+const canvas = $("gameCanvas");
+const ctx = canvas.getContext("2d");
+const ground = 220;
+let dino = { x: 75, y: ground - 48, w: 38, h: 48, vy: 0 };
+let obstacles = [];
+let score = 0;
+let speed = 5;
+let gameOver = false;
+let lastFrame = 0;
+let spawnTimer = 0;
+
+function resetGame() {
+  dino.y = ground - dino.h;
+  dino.vy = 0;
+  obstacles = [{ x: 650, w: 22, h: 42 }];
+  score = 0;
+  speed = 5;
+  gameOver = false;
+  spawnTimer = 0;
+  $("score").textContent = "0";
+}
+function jump() {
+  if (!gameOver && dino.y >= ground - dino.h - 1) dino.vy = -13;
+}
+function drawDino() {
+  ctx.fillStyle = "#444";
+  ctx.fillRect(dino.x + 5, dino.y + 12, 25, 30);
+  ctx.fillRect(dino.x + 19, dino.y, 24, 20);
+  ctx.fillRect(dino.x + 35, dino.y + 8, 12, 8);
+  ctx.fillRect(dino.x + 25, dino.y + 3, 4, 4);
+  ctx.fillRect(dino.x + 9, dino.y + 39, 8, 9);
+  ctx.fillRect(dino.x + 25, dino.y + 39, 8, 9);
+}
+function drawCactus(o) {
+  ctx.fillStyle = "#39834a";
+  ctx.fillRect(o.x + 7, ground - o.h, 10, o.h);
+  ctx.fillRect(o.x, ground - o.h + 13, 8, 7);
+  ctx.fillRect(o.x, ground - o.h + 7, 5, 13);
+  ctx.fillRect(o.x + 16, ground - o.h + 22, 8, 7);
+  ctx.fillRect(o.x + 19, ground - o.h + 16, 5, 13);
+}
+function drawScene() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#777";
+  ctx.fillRect(0, ground, canvas.width, 2);
+  ctx.fillStyle = "#ddd";
+  ctx.fillRect(560, 55, 70, 3);
+  ctx.fillRect(590, 45, 35, 3);
+  drawDino();
+  obstacles.forEach(drawCactus);
+  ctx.fillStyle = "#555";
+  ctx.font = "18px Arial";
+  ctx.fillText("DINO RUN", 18, 28);
+  if (gameOver) {
+    ctx.fillStyle = "#222";
+    ctx.font = "bold 36px Arial";
+    ctx.fillText("GAME OVER", 300, 115);
+    ctx.font = "18px Arial";
+    ctx.fillText("Tekan Mulai ulang untuk bermain lagi", 255, 145);
+  }
+}
+function gameLoop(timestamp) {
+  const dt = Math.min((timestamp - (lastFrame || timestamp)) / 16.67, 2);
+  lastFrame = timestamp;
+  if (!gameOver) {
+    dino.vy += 0.72 * dt;
+    dino.y += dino.vy * dt;
+    if (dino.y > ground - dino.h) {
+      dino.y = ground - dino.h;
+      dino.vy = 0;
+    }
+    spawnTimer += dt;
+    if (spawnTimer > 95 + Math.random() * 55) {
+      obstacles.push({ x: canvas.width + 10, w: 24, h: 35 + Math.random() * 20 });
+      spawnTimer = 0;
+    }
+    obstacles.forEach(o => o.x -= speed * dt);
+    obstacles = obstacles.filter(o => o.x > -40);
+    for (const o of obstacles) {
+      const hit = dino.x + 34 > o.x && dino.x + 8 < o.x + o.w &&
+                  dino.y + dino.h > ground - o.h + 4;
+      if (hit) gameOver = true;
+    }
+    score += dt;
+    speed = Math.min(9, 5 + score / 900);
+    $("score").textContent = Math.floor(score).toString();
+  }
+  drawScene();
+  requestAnimationFrame(gameLoop);
+}
+function startGame() {
+  resetGame();
+  if (!window.gameLoopStarted) {
+    window.gameLoopStarted = true;
+    requestAnimationFrame(gameLoop);
+  }
+}
+$("restart").addEventListener("click", resetGame);
+</script>
+</body>
+</html>
