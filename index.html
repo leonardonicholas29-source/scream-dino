@@ -55,7 +55,9 @@
     <h2>🎤 Pengendali Suara (HP)</h2>
     <p id="phoneStatus" class="status">Hubungkan ke tablet terlebih dahulu.</p>
     <button id="connect">Hubungkan ke tablet</button>
+    <button id="enableNotifications" class="secondary">Aktifkan notifikasi HP</button>
     <button id="mic" disabled>Aktifkan mikrofon</button>
+    <div id="phoneAlert" class="status hidden" role="status" aria-live="polite">Belum ada suara terdeteksi.</div>
     <label for="threshold">Sensitivitas suara: <span id="thresholdText">0.10</span></label>
     <input id="threshold" type="range" min="0.02" max="0.30" step="0.01" value="0.10">
     <div class="meter"><div id="meterFill"></div></div>
@@ -72,6 +74,50 @@ let connection = null;
 let audioContext = null;
 let animationMic = null;
 let lastSent = 0;
+let notificationRegistration = null;
+
+function showPhoneAlert(message) {
+  const alertBox = $("phoneAlert");
+  alertBox.textContent = "🔔 " + message;
+  alertBox.classList.remove("hidden");
+  if ("vibrate" in navigator) navigator.vibrate([120, 60, 120]);
+}
+
+async function enablePhoneNotifications() {
+  if (!("Notification" in window) || !("serviceWorker" in navigator)) {
+    showStatus("phoneStatus", "Notifikasi sistem tidak didukung browser ini. Pemberitahuan di halaman HP tetap tersedia.");
+    return;
+  }
+  try {
+    const permission = await Notification.requestPermission();
+    if (permission !== "granted") {
+      showStatus("phoneStatus", "Izin notifikasi belum diberikan. Pemberitahuan di halaman HP tetap tersedia.");
+      return;
+    }
+    notificationRegistration = await navigator.serviceWorker.register("./sw.js");
+    await navigator.serviceWorker.ready;
+    showStatus("phoneStatus", "Notifikasi HP aktif! Kamu akan mendapat pemberitahuan saat suara terdeteksi.");
+    showPhoneAlert("Notifikasi HP berhasil diaktifkan.");
+  } catch (error) {
+    showStatus("phoneStatus", "Notifikasi sistem gagal diaktifkan. Pemberitahuan di halaman tetap tersedia.");
+  }
+}
+
+async function sendPhoneNotification(message) {
+  showPhoneAlert(message);
+  if (notificationRegistration && "Notification" in window && Notification.permission === "granted") {
+    try {
+      await notificationRegistration.showNotification("Scream Controlled Dino", {
+        body: message,
+        tag: "scream-dino-event",
+        renotify: true,
+        vibrate: [120, 60, 120]
+      });
+    } catch (error) {
+      // Pemberitahuan di halaman tetap tersedia.
+    }
+  }
+}
 
 function getRoom() {
   const room = $("room").value.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -123,6 +169,8 @@ $("phoneMode").addEventListener("click", () => {
   $("gamePanel").classList.add("hidden");
   showStatus("phoneStatus", "Tekan tombol Hubungkan ke tablet.");
 });
+
+$("enableNotifications").addEventListener("click", enablePhoneNotifications);
 
 $("connect").addEventListener("click", () => {
   const room = getRoom();
@@ -178,6 +226,7 @@ $("mic").addEventListener("click", async () => {
         if (connection && connection.open) {
           connection.send({ type: "jump" });
           showStatus("soundStatus", "Suara terdeteksi! Perintah lompat dikirim.");
+          sendPhoneNotification("Suara terdeteksi — perintah lompat dikirim ke tablet.");
           lastSent = now;
         }
       }
